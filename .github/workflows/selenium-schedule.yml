@@ -2,8 +2,8 @@ name: Selenium scheduled run
 
 on:
   schedule:
-    - cron: '0 0,12 * * *'   # 00:00 and 12:00 UTC daily
-  workflow_dispatch:         # allows manual trigger
+    - cron: '0 0,12 * * *'   # runs at 00:00 and 12:00 UTC daily
+  workflow_dispatch: {}      # allows manual runs from the Actions UI
 
 jobs:
   run-selenium:
@@ -14,63 +14,56 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.10
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
-      - name: Install system packages (Firefox, wget, unzip, Xvfb)
+      - name: Install system packages
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y firefox wget unzip xvfb
+          sudo apt-get install -y firefox wget tar unzip xvfb curl
 
       - name: Install geckodriver (robust)
-  run: |
-    set -euo pipefail
-    echo "Detecting latest geckodriver release from GitHub..."
-    LATEST_TAG=$(curl -s https://api.github.com/repos/mozilla/geckodriver/releases/latest | python -c "import sys, json; print(json.load(sys.stdin)['tag_name'])")
-    echo "Latest tag: $LATEST_TAG"
-    VERSION=${GECKO_PIN:-$LATEST_TAG}
-    echo "Using geckodriver version: $VERSION"
-
-    ARCH=linux64
-    TARBALL="geckodriver-${VERSION#v}-${ARCH}.tar.gz"
-    URL="https://github.com/mozilla/geckodriver/releases/download/${VERSION}/${TARBALL}"
-    echo "Download URL: $URL"
-
-    # Download with retries
-    wget -q --tries=5 --timeout=30 -O /tmp/${TARBALL} "$URL" || { echo "Download failed"; ls -la /tmp; exit 2; }
-
-    # sanity checks
-    if [ ! -s /tmp/${TARBALL} ]; then
-      echo "Tarball missing or empty: /tmp/${TARBALL}"
-      ls -la /tmp
-      exit 3
-    fi
-
-    tar -xzf /tmp/${TARBALL} -C /tmp || { echo "tar extraction failed"; ls -la /tmp; exit 4; }
-    sudo mv /tmp/geckodriver /usr/local/bin/geckodriver
-    sudo chmod +x /usr/local/bin/geckodriver
-    geckodriver --version
-  env:
-    GECKO_PIN: "v0.34.0"    # optional override; remove or change as needed
+        run: |
+          set -euo pipefail
+          echo "Detecting latest geckodriver release..."
+          LATEST_TAG=$(curl -s https://api.github.com/repos/mozilla/geckodriver/releases/latest | grep -oP '"tag_name":\s*"\K(.*?)(?=")')
+          echo "Latest tag: $LATEST_TAG"
+          VERSION=${GECKO_PIN:-$LATEST_TAG}
+          echo "Using version: $VERSION"
+          ARCH=linux64
+          TARBALL="geckodriver-${VERSION#v}-${ARCH}.tar.gz"
+          URL="https://github.com/mozilla/geckodriver/releases/download/${VERSION}/${TARBALL}"
+          echo "Download URL: $URL"
+          wget --tries=5 --timeout=30 -O /tmp/${TARBALL} "$URL"
+          if [ ! -s /tmp/${TARBALL} ]; then
+            echo "Download failed or file empty: /tmp/${TARBALL}"
+            ls -la /tmp
+            exit 2
+          fi
+          tar -xzf /tmp/${TARBALL} -C /tmp
+          sudo mv /tmp/geckodriver /usr/local/bin/geckodriver
+          sudo chmod +x /usr/local/bin/geckodriver
+          geckodriver --version
+        env:
+          GECKO_PIN: "v0.34.0"
 
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Start Xvfb (safe fallback) and run script
+      - name: Start Xvfb and run the Selenium script
         env:
           INPUT_FILE: links.xlsx
           OUTPUT_FILE: final_results-remaining.xlsx
         run: |
           export DISPLAY=:99
           Xvfb :99 -ac -screen 0 1280x1024x24 &
-
           python finalized.py
 
-      - name: Upload Excel result
+      - name: Upload Excel result artifact
         uses: actions/upload-artifact@v4
         with:
           name: selenium-results
