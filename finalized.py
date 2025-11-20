@@ -1,0 +1,175 @@
+###### Finallized
+import os
+import time
+import requests
+import pandas as pd
+from bs4 import BeautifulSoup
+from datetime import datetime
+
+from selenium import webdriver
+from selenium.webdriver.firefox.options import Options
+from selenium.webdriver.common.by import By
+from selenium.common.exceptions import WebDriverException
+
+# ================= CONFIG ==================
+INPUT_FILE = "links.xlsx"
+SHEET_NAME = "Links"
+COLUMN_NAME = "URL"
+OUTPUT_FILE = "final_results-remaining.xlsx"
+
+HTTP_TIMEOUT = 8
+SELENIUM_TIMEOUT = 30
+HEADLESS = True  # True → run hidden
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:130.0) Gecko/20100101 Firefox/130.0",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Referer": "https://www.google.com/",
+    "Connection": "keep-alive"
+}
+
+CF_SIGNS = [
+    "checking your browser",
+    "please stand by",
+    "verify you are human",
+    "security check",
+    "attention required",
+    "cf-browser-verification",
+    "cloudflare"
+]
+# ===========================================
+
+
+def load_urls():
+    df = pd.read_excel(INPUT_FILE, sheet_name=SHEET_NAME)
+    return df[COLUMN_NAME].dropna().astype(str).tolist()
+
+
+def http_check(url):
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=HTTP_TIMEOUT)
+        soup = BeautifulSoup(r.text, "html.parser")
+        title = soup.title.text.strip() if soup.title else ""
+        return r.status_code, title
+    except Exception:
+        return None, ""
+
+
+def need_selenium(status, title):
+    if status is None or status >= 400:
+        return True
+    if not title:
+        return True
+    if any(x in title.lower() for x in CF_SIGNS):
+        return True
+    return False
+
+
+def setup_driver():
+    opts = Options()
+    if HEADLESS:
+        opts.add_argument("--headless")
+
+    opts.set_preference("dom.webdriver.enabled", False)
+    opts.set_preference("useAutomationExtension", False)
+
+    driver = webdriver.Firefox(options=opts)
+    driver.set_page_load_timeout(SELENIUM_TIMEOUT)
+    return driver
+
+
+def selenium_check(driver, url):
+    try:
+        driver.get(url)
+    except WebDriverException as e:
+        return "DOWN", f"Selenium error: {str(e)[:80]}"
+
+    time.sleep(3)
+
+    def get_title_and_body():
+        title = driver.title.strip() if driver.title else ""
+        try:
+            body_text = driver.find_element(By.TAG_NAME, "body").text.strip()
+        except:
+            body_text = ""
+        return title, body_text
+
+    title, body_text = get_title_and_body()
+    page = driver.page_source.lower()
+
+    # Instant mark: Challenge before content
+    if any(x in page for x in CF_SIGNS) and not (len(body_text) > 100 or title):
+        print("  - Security challenge immediately → skipping")
+        return "BLOCKED_CF", title or "Blocked by Cloudflare"
+
+    # Proper content detected first
+    if driver.title and len(body_text) > 100:
+        print("  - Content loaded → storing result")
+        return "WORKING", driver.title
+
+    # Retry small wait
+    timeout = time.time() + 10
+    while time.time() < timeout:
+        time.sleep(2)
+        title, body_text = get_title_and_body()
+        page = driver.page_source.lower()
+
+        if driver.title and len(body_text) > 100:
+            return "WORKING", driver.title
+
+        if any(x in page for x in CF_SIGNS):
+            print("  - No content + challenge → skipping")
+            return "BLOCKED_CF", title or "Blocked by Cloudflare"
+
+    return "NO_CONTENT", title or "No useful content"
+
+
+def save_results(results):
+    pd.DataFrame(results).to_excel(OUTPUT_FILE, index=False)
+
+
+def main():
+    urls = load_urls()
+
+    if os.path.exists(OUTPUT_FILE):
+        os.remove(OUTPUT_FILE)
+
+    driver = setup_driver()
+    results = []
+    total = len(urls)
+
+    for i, url in enumerate(urls, start=1):
+        print(f"\n[{i}/{total}] Checking: {url}")
+        start = time.time()
+        timestamp = datetime.utcnow().isoformat(timespec="seconds")
+
+        http_code, title = http_check(url)
+
+        if need_selenium(http_code, title):
+            print("  → Using browser due to possible block/protection…")
+            status, title = selenium_check(driver, url)
+        else:
+            status = "WORKING"
+
+        duration = round(time.time() - start, 2)
+
+        print(f"  → FINAL: {status} | HTTP: {http_code} | Title: {title[:60]} | Time: {duration}s")
+
+        results.append({
+            "URL": url,
+            "STATUS": status,
+            "HTTP_CODE": http_code,   # <-- Added
+            "TITLE": title,
+            "CHECKED_AT_UTC": timestamp,
+            "TIME_SEC": duration
+        })
+
+        save_results(results)
+
+    driver.quit()
+    print(f"\n✓ Done → Results saved: {OUTPUT_FILE}")
+
+
+if __name__ == "__main__":
+    main()
