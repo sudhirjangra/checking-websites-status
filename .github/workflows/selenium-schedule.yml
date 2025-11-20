@@ -24,13 +24,36 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y firefox wget unzip xvfb
 
-      - name: Install geckodriver (pinned)
-        run: |
-          GECKO_VER="v0.34.0"   # pin a stable release; update if needed
-          wget -q "https://github.com/mozilla/geckodriver/releases/download/${GECKO_VER}/geckodriver-${GECKO_VER#v}-linux64.tar.gz"
-          tar -xzf geckodriver-*-linux64.tar.gz
-          sudo mv geckodriver /usr/local/bin/
-          geckodriver --version
+      - name: Install geckodriver (robust)
+  run: |
+    set -euo pipefail
+    echo "Detecting latest geckodriver release from GitHub..."
+    LATEST_TAG=$(curl -s https://api.github.com/repos/mozilla/geckodriver/releases/latest | python -c "import sys, json; print(json.load(sys.stdin)['tag_name'])")
+    echo "Latest tag: $LATEST_TAG"
+    VERSION=${GECKO_PIN:-$LATEST_TAG}
+    echo "Using geckodriver version: $VERSION"
+
+    ARCH=linux64
+    TARBALL="geckodriver-${VERSION#v}-${ARCH}.tar.gz"
+    URL="https://github.com/mozilla/geckodriver/releases/download/${VERSION}/${TARBALL}"
+    echo "Download URL: $URL"
+
+    # Download with retries
+    wget -q --tries=5 --timeout=30 -O /tmp/${TARBALL} "$URL" || { echo "Download failed"; ls -la /tmp; exit 2; }
+
+    # sanity checks
+    if [ ! -s /tmp/${TARBALL} ]; then
+      echo "Tarball missing or empty: /tmp/${TARBALL}"
+      ls -la /tmp
+      exit 3
+    fi
+
+    tar -xzf /tmp/${TARBALL} -C /tmp || { echo "tar extraction failed"; ls -la /tmp; exit 4; }
+    sudo mv /tmp/geckodriver /usr/local/bin/geckodriver
+    sudo chmod +x /usr/local/bin/geckodriver
+    geckodriver --version
+  env:
+    GECKO_PIN: "v0.34.0"    # optional override; remove or change as needed
 
       - name: Install Python dependencies
         run: |
